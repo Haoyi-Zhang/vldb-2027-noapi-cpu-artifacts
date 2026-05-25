@@ -14,13 +14,13 @@ Current public release: https://github.com/Haoyi-Zhang/vldb-2027-noapi-cpu-artif
 
 | Asset | Size | SHA-256 |
 |---|---:|---|
-| `cegar-sql-minimal-release-staging.tar.gz` | 4932929 | `0334d83904a48859ca1ecd8973e8574106d33dcd7df1adbcb59ee08a44c8225b` |
-| `locallakeagent-minimal-release-staging.tar.gz` | 20702780 | `b73fbb57e2a1c0d272819fae5ff216704c270c504fefc0068159c21ec4b5634b` |
-| `realops-sql-minimal-release-staging.tar.gz` | 14354196 | `3b6d09497f2eba52572f5a067f7288cc73eee3dd89acc9efeee1171095ddebc2` |
-| `semantic-query-budgets-minimal-release-staging.tar.gz` | 37100028 | `fea8eee08b39bc0efd0561a93ae7107e7d14c421a96b48a9de6de82d33224e20` |
-| `tablecompass-minimal-release-staging.tar.gz` | 41411219 | `e9284448019896859f15c114c637d9d03085ec95a0c34860da04697189d8bd79` |
-| `targetrecall-fvs-minimal-release-staging.tar.gz` | 7790136 | `6a6503de6aaeff90dab442e07170435e08a4946791a82ff47aac4798183c1c47` |
-| `udfwise-minimal-release-staging.tar.gz` | 24183409 | `41e5049187ea7b5b59f69885b996e1b359b4671240f6a042e49cfc64190d4155` |
-| `vectoropsbench-minimal-release-staging.tar.gz` | 17633604 | `12de13dc918af163f553af62da298eca4bac19f9be805ffae042fd044b4f777c` |
+| `cegar-sql-minimal-release-staging.tar.gz` | 4932704 | `ccc338fb438eaf8a3d84c2b4004a11a713ecf299c625daebcf5e46a09c6a3969` |
+| `locallakeagent-minimal-release-staging.tar.gz` | 20703222 | `28783c428948ae1ff15d180e675d220a3c8152d77775b2dbbb53135b081f95a2` |
+| `realops-sql-minimal-release-staging.tar.gz` | 14353956 | `3f3a0bb3af0300fcff949a0fa817f94e2675963e9e4606685ec2e7578dd9f219` |
+| `semantic-query-budgets-minimal-release-staging.tar.gz` | 37099299 | `abf2422d7c8940fa6e41f08e46e5b59595137d79db3f830d4003c87b5e2c0c93` |
+| `tablecompass-minimal-release-staging.tar.gz` | 41411344 | `aed9629668d56bbdaf5c6892a37163eba0e7afc2907693d60daddb42489df905` |
+| `targetrecall-fvs-minimal-release-staging.tar.gz` | 7790402 | `ad6313f95224394aaf5a8caeb63cfebcfbe47ddfd1bbc549f7222935564ff313` |
+| `udfwise-minimal-release-staging.tar.gz` | 24183342 | `b3c92eafa3e23c7102ca7f94fa11f0d4d02b634285c3e277148c82defbbc4141` |
+| `vectoropsbench-minimal-release-staging.tar.gz` | 17633435 | `4e6cfa52cfed12cbca831e2b610d167e79577b91fbc68a3985da813ec2ac0082` |
 
 The artifacts are intended for reviewer reproduction and audit of frozen CPU-only evidence packages. The May 25, 2026 refresh keeps p04/p05 live-provider modules out of the release while adding offline import stubs so reviewer audit commands execute in clean unpacked packages.
