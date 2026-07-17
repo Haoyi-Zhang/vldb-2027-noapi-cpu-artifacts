@@ -1,0 +1,304 @@
+name: Temporary KDD-R11 public data freeze
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  freeze:
+    if: github.head_ref == 'tmp-kdd-r11-data-20260717'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SNAPSHOT_DATE: '2026-07-17'
+      HORIZON_DAYS: '365'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and normalize public advisory data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p kdd-r11-data
+          python - <<'PY'
+          from __future__ import annotations
+          import csv, gzip, hashlib, json, os, re, sys, time
+          from datetime import date, datetime, timedelta, timezone
+          from pathlib import Path
+          from urllib.parse import urlparse
+          import requests
+
+          out = Path('kdd-r11-data')
+          snapshot = date.fromisoformat(os.environ['SNAPSHOT_DATE'])
+          horizon = int(os.environ['HORIZON_DAYS'])
+          maturity_cutoff = snapshot - timedelta(days=horizon)
+          token = os.environ['GH_TOKEN']
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'kdd-r11-public-data-freeze',
+          }
+
+          def sha256_bytes(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          def get_with_retry(url: str, *, params=None, headers=None, attempts: int = 8) -> requests.Response:
+              delay = 2.0
+              for attempt in range(attempts):
+                  r = requests.get(url, params=params, headers=headers, timeout=90)
+                  if r.status_code == 200:
+                      return r
+                  if r.status_code in (403, 429, 500, 502, 503, 504):
+                      retry = r.headers.get('Retry-After')
+                      wait = float(retry) if retry and retry.isdigit() else delay
+                      time.sleep(min(wait, 60.0))
+                      delay = min(delay * 1.8, 60.0)
+                      continue
+                  raise RuntimeError(f'GET {r.url} failed: {r.status_code} {r.text[:500]}')
+              raise RuntimeError(f'GET {url} exhausted retries')
+
+          # Freeze the official CISA KEV feed. The GitHub mirror is a byte-level fallback.
+          cisa_urls = [
+              'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json',
+              'https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json',
+          ]
+          cisa_response = None
+          cisa_source = None
+          for u in cisa_urls:
+              try:
+                  cisa_response = get_with_retry(u, headers={'User-Agent': 'kdd-r11-public-data-freeze'})
+                  cisa_source = u
+                  break
+              except Exception as exc:
+                  print(f'CISA source failed: {u}: {exc}', file=sys.stderr)
+          if cisa_response is None:
+              raise RuntimeError('all CISA KEV sources failed')
+          cisa_bytes = cisa_response.content
+          (out / 'cisa-known-exploited-vulnerabilities.json').write_bytes(cisa_bytes)
+          cisa_obj = json.loads(cisa_bytes)
+          kev_rows = cisa_obj.get('vulnerabilities', cisa_obj if isinstance(cisa_obj, list) else [])
+          kev_dates = {}
+          for row in kev_rows:
+              cve = str(row.get('cveID') or row.get('cveId') or '').upper().strip()
+              added = str(row.get('dateAdded') or '').strip()
+              if cve and added:
+                  try:
+                      kev_dates[cve] = date.fromisoformat(added[:10])
+                  except ValueError:
+                      pass
+
+          # Cursor-paginate the official GitHub Global Security Advisories API.
+          api_url = 'https://api.github.com/advisories'
+          params = {
+              'type': 'reviewed',
+              'per_page': 100,
+              'sort': 'published',
+              'direction': 'asc',
+              'published': f'<={maturity_cutoff.isoformat()}',
+          }
+          page = 0
+          compact = []
+          page_ledger = []
+          next_url = api_url
+          next_params = params
+          while next_url:
+              r = get_with_retry(next_url, params=next_params, headers=headers)
+              next_params = None
+              batch = r.json()
+              if not isinstance(batch, list):
+                  raise RuntimeError(f'unexpected GitHub response: {type(batch)}')
+              page += 1
+              page_ledger.append({
+                  'page': page,
+                  'url': r.url,
+                  'etag': r.headers.get('ETag'),
+                  'count': len(batch),
+                  'response_sha256': sha256_bytes(r.content),
+              })
+              for a in batch:
+                  vulns = []
+                  for v in a.get('vulnerabilities') or []:
+                      pkg = v.get('package') or {}
+                      vulns.append({
+                          'ecosystem': str(pkg.get('ecosystem') or ''),
+                          'name': str(pkg.get('name') or ''),
+                          'vulnerable_version_range': str(v.get('vulnerable_version_range') or ''),
+                          'first_patched_version': str(v.get('first_patched_version') or ''),
+                          'vulnerable_function_count': len(v.get('vulnerable_functions') or []),
+                      })
+                  identifiers = [
+                      {'type': str(x.get('type') or ''), 'value': str(x.get('value') or '')}
+                      for x in (a.get('identifiers') or [])
+                  ]
+                  compact.append({
+                      'ghsa_id': a.get('ghsa_id'),
+                      'cve_id': a.get('cve_id'),
+                      'identifiers': identifiers,
+                      'published_at': a.get('published_at'),
+                      'updated_at': a.get('updated_at'),
+                      'github_reviewed_at': a.get('github_reviewed_at'),
+                      'nvd_published_at': a.get('nvd_published_at'),
+                      'withdrawn_at': a.get('withdrawn_at'),
+                      'severity': a.get('severity'),
+                      'source_code_location': a.get('source_code_location'),
+                      'vulnerabilities': vulns,
+                      'cwes': [str(x.get('cwe_id') or '') for x in (a.get('cwes') or [])],
+                      'cvss_score': ((a.get('cvss') or {}).get('score')),
+                  })
+              link = r.links.get('next', {}).get('url')
+              next_url = link
+              print(f'page={page} rows={len(batch)} total={len(compact)} next={bool(next_url)}')
+              if page > 1000:
+                  raise RuntimeError('pagination guard exceeded')
+
+          # Canonical compact snapshot, one advisory per line.
+          compact_path = out / 'github-global-advisories.jsonl.gz'
+          with gzip.open(compact_path, 'wt', encoding='utf-8', newline='\n', compresslevel=9, mtime=0) as f:
+              for row in compact:
+                  f.write(json.dumps(row, sort_keys=True, separators=(',', ':'), ensure_ascii=False) + '\n')
+
+          cve_re = re.compile(r'^CVE-\d{4}-\d{4,}$', re.I)
+          fields = [
+              'advisory_id','published_at','ecosystem','package_name','package_count',
+              'affected_count','range_type_count','cve_count','publication_month',
+              'publication_quarter','label_kev_within_horizon','label_delay_days',
+              'kev_date','linked_cves','mutable_severity','mutable_cvss_score',
+              'mutable_updated_at','source_snapshot'
+          ]
+          benchmark = []
+          stats = {
+              'api_advisories': len(compact), 'with_cve': 0, 'with_package': 0,
+              'preexisting_kev_excluded': 0, 'right_censored_excluded': 0,
+              'withdrawn_excluded': 0, 'primary_rows': 0, 'positives': 0,
+          }
+          for a in compact:
+              if a.get('withdrawn_at'):
+                  stats['withdrawn_excluded'] += 1
+                  continue
+              try:
+                  pub_dt = datetime.fromisoformat(str(a.get('published_at')).replace('Z', '+00:00'))
+              except Exception:
+                  continue
+              pub_date = pub_dt.date()
+              if pub_date > maturity_cutoff:
+                  stats['right_censored_excluded'] += 1
+                  continue
+              cves = set()
+              if a.get('cve_id') and cve_re.match(str(a['cve_id'])):
+                  cves.add(str(a['cve_id']).upper())
+              for ident in a.get('identifiers') or []:
+                  if str(ident.get('type')).upper() == 'CVE' and cve_re.match(str(ident.get('value') or '')):
+                      cves.add(str(ident['value']).upper())
+              if not cves:
+                  continue
+              stats['with_cve'] += 1
+              vulns = [v for v in (a.get('vulnerabilities') or []) if v.get('ecosystem') and v.get('name')]
+              if not vulns:
+                  continue
+              stats['with_package'] += 1
+              kev_linked = sorted((kev_dates[c], c) for c in cves if c in kev_dates)
+              if kev_linked and kev_linked[0][0] <= pub_date:
+                  stats['preexisting_kev_excluded'] += 1
+                  continue
+              within = [(d, c) for d, c in kev_linked if pub_date < d <= pub_date + timedelta(days=horizon)]
+              label = int(bool(within))
+              if within:
+                  event_date, _ = min(within)
+                  delay = (event_date - pub_date).days
+                  kev_date = event_date.isoformat()
+              else:
+                  delay = horizon
+                  kev_date = ''
+              ecosystems = sorted({str(v['ecosystem']) for v in vulns})
+              packages = sorted({str(v['name']) for v in vulns})
+              ecosystem = ecosystems[0] if len(ecosystems) == 1 else 'Mixed'
+              package_name = packages[0] if len(packages) == 1 else '|'.join(packages[:4])
+              range_types = set()
+              for v in vulns:
+                  s = str(v.get('vulnerable_version_range') or '')
+                  if s:
+                      range_types.update(re.findall(r'(?:<=|>=|<|>|=|\^|~)', s))
+              benchmark.append({
+                  'advisory_id': a.get('ghsa_id') or '',
+                  'published_at': pub_dt.astimezone(timezone.utc).isoformat().replace('+00:00','Z'),
+                  'ecosystem': ecosystem,
+                  'package_name': package_name,
+                  'package_count': len(packages),
+                  'affected_count': len(vulns),
+                  'range_type_count': max(1, len(range_types)) if vulns else 0,
+                  'cve_count': len(cves),
+                  'publication_month': pub_date.month,
+                  'publication_quarter': (pub_date.month - 1) // 3 + 1,
+                  'label_kev_within_horizon': label,
+                  'label_delay_days': delay,
+                  'kev_date': kev_date,
+                  'linked_cves': '|'.join(sorted(cves)),
+                  'mutable_severity': a.get('severity') or '',
+                  'mutable_cvss_score': '' if a.get('cvss_score') is None else a.get('cvss_score'),
+                  'mutable_updated_at': a.get('updated_at') or '',
+                  'source_snapshot': snapshot.isoformat(),
+              })
+
+          benchmark.sort(key=lambda r: (r['published_at'], r['advisory_id']))
+          stats['primary_rows'] = len(benchmark)
+          stats['positives'] = sum(int(r['label_kev_within_horizon']) for r in benchmark)
+          stats['positive_rate'] = stats['positives'] / len(benchmark) if benchmark else 0.0
+          if not benchmark or stats['positives'] < 10:
+              raise RuntimeError(f'benchmark too small or too few positives: {stats}')
+          bench_path = out / 'ghsa_cisa_benchmark.csv'
+          with bench_path.open('w', encoding='utf-8', newline='') as f:
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader(); w.writerows(benchmark)
+
+          provenance = {
+              'schema': 'KDD_R11_PUBLIC_DATA_FREEZE_V2',
+              'snapshot_date': snapshot.isoformat(),
+              'horizon_days': horizon,
+              'maturity_cutoff': maturity_cutoff.isoformat(),
+              'github_api': {
+                  'endpoint': api_url,
+                  'parameters': params,
+                  'pages': page,
+                  'advisories': len(compact),
+                  'page_ledger': page_ledger,
+                  'compact_filename': compact_path.name,
+                  'compact_sha256': hashlib.sha256(compact_path.read_bytes()).hexdigest(),
+              },
+              'cisa_kev': {
+                  'source_url': cisa_source,
+                  'catalog_version': cisa_obj.get('catalogVersion') if isinstance(cisa_obj, dict) else None,
+                  'date_released': cisa_obj.get('dateReleased') if isinstance(cisa_obj, dict) else None,
+                  'count': len(kev_rows),
+                  'filename': 'cisa-known-exploited-vulnerabilities.json',
+                  'sha256': sha256_bytes(cisa_bytes),
+              },
+              'benchmark': {
+                  'filename': bench_path.name,
+                  'sha256': hashlib.sha256(bench_path.read_bytes()).hexdigest(),
+                  'stats': stats,
+              },
+          }
+          (out / 'provenance.json').write_text(json.dumps(provenance, indent=2, sort_keys=True), encoding='utf-8')
+          (out / 'README.md').write_text(
+              '# KDD-R11 public data freeze\n\n'
+              f'Snapshot: {snapshot.isoformat()}\n\n'
+              'Sources: GitHub Global Security Advisories API and the CISA KEV public catalog.\n'
+              'The compact GitHub snapshot excludes advisory prose and references; the benchmark uses only structural and calendar features.\n',
+              encoding='utf-8'
+          )
+          print(json.dumps(provenance['benchmark']['stats'], indent=2))
+          PY
+          sha256sum kdd-r11-data/* | sort > kdd-r11-data/SHA256SUMS.txt
+      - name: Upload frozen public data
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdd-r11-public-data-20260717
+          path: kdd-r11-data/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
